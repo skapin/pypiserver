@@ -91,11 +91,13 @@ def image() -> str:
     return tag
 
 
-def wait_for_container(port: int) -> None:
+def wait_for_container(port: int, url_path: t.Optional[str] = None) -> None:
     """Wait for the container to be available."""
     for _ in range(60):
         try:
-            httpx.get(f"http://localhost:{port}").raise_for_status()
+            httpx.get(
+                f"http://localhost:{port}" + (url_path if url_path else "")
+            ).raise_for_status()
         except (httpx.RequestError, httpx.HTTPStatusError):
             time.sleep(1)
         else:
@@ -632,14 +634,8 @@ class TestAuthed:
 
 
 class TestHeavyPackage:
-    """Test for a workaround of https://github.com/pypiserver/pypiserver/issues/630."""
-
-    override_with_100_mb = (
-        f"PYPISERVER_BOTTLE_MEMFILE_MAX_OVERRIDE_BYTES={(2**20) * 100}"
-    )
-
     @pytest.fixture(scope="class")
-    def patched_container(
+    def container(
         self, request: pytest.FixtureRequest, image: str
     ) -> t.Iterator[ContainerInfo]:
         """Run the pypiserver container.
@@ -651,8 +647,6 @@ class TestHeavyPackage:
             "docker",
             "run",
             "--rm",
-            "--env",
-            self.override_with_100_mb,
             "--publish",
             f"{port}:8080",
             "--detach",
@@ -672,7 +666,7 @@ class TestHeavyPackage:
     @pytest.fixture(scope="class")
     def upload_mypkg_heavy(
         self,
-        patched_container: ContainerInfo,
+        container: ContainerInfo,
         mypkg_heavy_paths: t.Dict[str, Path],
     ) -> None:
         """Upload mypkg to the container."""
@@ -682,7 +676,7 @@ class TestHeavyPackage:
             "twine",
             "upload",
             "--repository-url",
-            f"http://localhost:{patched_container.port}",
+            f"http://localhost:{container.port}",
             "--username",
             "a",
             "--password",
@@ -691,7 +685,7 @@ class TestHeavyPackage:
         )
 
     @pytest.mark.usefixtures("upload_mypkg_heavy")
-    def test_download(self, patched_container: ContainerInfo) -> None:
+    def test_download(self, container: ContainerInfo) -> None:
         """Download mypkg_heavy from the container."""
         with tempfile.TemporaryDirectory() as tmpdir:
             run(
@@ -700,12 +694,88 @@ class TestHeavyPackage:
                 "pip",
                 "download",
                 "--index-url",
-                f"http://localhost:{patched_container.port}/simple",
+                f"http://localhost:{container.port}/simple",
                 "--dest",
                 tmpdir,
                 "pypiserver_mypkg_heavy",
             )
             assert any(
                 "pypiserver_mypkg_heavy" in path.name
+                for path in Path(tmpdir).iterdir()
+            )
+
+
+class TestServerPrefix:
+    prefix_url = "/prefix/"
+
+    @pytest.fixture(scope="class")
+    def container(
+        self, request: pytest.FixtureRequest, image: str
+    ) -> t.Iterator[ContainerInfo]:
+        """Run the pypiserver container.
+
+        Returns the container ID.
+        """
+        port = get_socket()
+        args = (
+            "docker",
+            "run",
+            "--rm",
+            "--publish",
+            f"{port}:8080",
+            "--detach",
+            image,
+            "run",
+            "--passwords",
+            ".",
+            "--authenticate",
+            ".",
+            "--server-base-url",
+            self.prefix_url,
+        )
+        res = run(*args, capture=True)
+        wait_for_container(port, url_path=self.prefix_url)
+        container_id = res.out.strip()
+        yield ContainerInfo(container_id, port, args)
+        run("docker", "container", "rm", "-f", container_id)
+
+    @pytest.fixture(scope="class")
+    def upload_mypkg(
+        self,
+        container: ContainerInfo,
+        mypkg_paths: t.Dict[str, Path],
+    ) -> None:
+        """Upload mypkg to the container."""
+        run(
+            sys.executable,
+            "-m",
+            "twine",
+            "upload",
+            "--repository-url",
+            f"http://localhost:{container.port}{self.prefix_url}",
+            "--username",
+            "a",
+            "--password",
+            "a",
+            f"{mypkg_paths['dist_dir']}/*",
+        )
+
+    @pytest.mark.usefixtures("upload_mypkg")
+    def test_download(self, container: ContainerInfo) -> None:
+        """Download mypkg from the container."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run(
+                sys.executable,
+                "-m",
+                "pip",
+                "download",
+                "--index-url",
+                f"http://localhost:{container.port}{self.prefix_url}simple",
+                "--dest",
+                tmpdir,
+                "pypiserver_mypkg",
+            )
+            assert any(
+                "pypiserver_mypkg" in path.name
                 for path in Path(tmpdir).iterdir()
             )
