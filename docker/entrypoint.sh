@@ -121,13 +121,13 @@ if [[ "$*" == "" ]]; then
     # bottle's default server
     CMD=("run" "-p" "${PYPISERVER_PORT:-$PORT}" "--server" "gunicorn")
 
-    # Add server-base-url if specified
-    if [[ -n "${SERVER_BASE_URL:-}" ]]; then
-        CMD+=("--server-base-url" "$SERVER_BASE_URL")
-    fi
 else
     # this reassigns the array to the CMD variable
     CMD=( "${@}" )
+fi
+# Add server-base-url if specified
+if [[ -n "${SERVER_BASE_URL:-}" ]]; then
+    CMD+=("--server-base-url" "$SERVER_BASE_URL")
 fi
 
 if [[ "$EUID" -ne 0 ]]; then
